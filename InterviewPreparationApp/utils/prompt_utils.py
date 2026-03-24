@@ -5,6 +5,115 @@ from typing import Any, Literal
 
 from openai import OpenAI
 
+ZERO_SHOT_PROMPT = """
+You are an expert interview preparation assistant.
+
+Using the provided resume and job description, generate a list of interview questions categorized into:
+1. Technical Questions
+2. Behavioral Questions
+3. Role-Specific Questions
+
+Ensure:
+- Questions are relevant to the job role
+- Questions reflect the candidate's experience
+- Difficulty matches the selected level (Beginner, Intermediate, Advanced)
+
+Return clear and concise questions.
+"""
+
+FEW_SHOT_PROMPT = """
+You are an interview preparation assistant.
+
+Example:
+
+Input:
+Role: Data Analyst
+Difficulty: Beginner
+
+Output:
+Technical:
+- What is SQL?
+- Explain INNER JOIN vs LEFT JOIN.
+
+Behavioral:
+- Tell me about a time you solved a problem.
+
+Role-Specific:
+- How would you clean a dataset?
+
+---
+
+Now generate interview questions based on the following:
+
+- Resume
+- Job Description
+- Difficulty Level
+
+Follow the same structure as the example.
+"""
+
+COT_PROMPT = """
+You are an expert recruiter and interview coach.
+
+Follow these steps internally:
+1. Extract key skills from the job description
+2. Analyze candidate's resume
+3. Identify strengths and gaps
+4. Adjust questions based on difficulty level
+5. Create targeted interview questions
+
+Output ONLY the final result in this format:
+
+Technical Questions:
+- ...
+
+Behavioral Questions:
+- ...
+
+Role-Specific Questions:
+- ...
+
+Do not show your reasoning steps.
+"""
+
+ROLE_BASED_PROMPT = """
+Act as a senior hiring manager at a top-tier company.
+
+Your goal is to evaluate a candidate thoroughly.
+
+Generate interview questions that:
+- Test real-world problem solving
+- Assess depth of knowledge
+- Reflect actual interview scenarios used in industry
+
+Include:
+1. Technical Questions
+2. Behavioral Questions
+3. Role-Specific Case/Scenario Questions
+
+Adjust difficulty level appropriately.
+
+Make questions challenging, practical, and realistic.
+"""
+
+STRUCTURED_PROMPT = """
+You are an interview preparation assistant.
+
+Generate interview questions strictly in the following JSON format:
+
+{
+  "technical": [],
+  "behavioral": [],
+  "role_specific": []
+}
+
+Rules:
+- Each list must contain at least 3 questions
+- Questions must match the job description and resume
+- Adjust difficulty level (Beginner, Intermediate, Advanced)
+- Ensure no extra text outside JSON
+"""
+
 
 PromptTechnique = Literal[
     "Role-Based Prompting",
@@ -21,29 +130,14 @@ INJECTION_GUARD_RULE = (
 
 
 def _technique_preamble(prompt_technique: PromptTechnique) -> str:
-    if prompt_technique == "Role-Based Prompting":
-        return (
-            "You are a senior interview coach and hiring manager. "
-            "You ask incisive, role-relevant questions and adapt difficulty precisely."
-        )
-    if prompt_technique == "Zero-Shot Prompting":
-        return "You are an expert interview coach. Generate high-quality interview practice content in one pass."
-    if prompt_technique == "Few-Shot Learning":
-        return (
-            "You are an expert interview coach. Follow the examples to format outputs.\n\n"
-            "Example (Beginner): Q: What is a JOIN? (Expected focus: INNER/LEFT, when to use)\n"
-            "Example (Advanced): Q: Optimize this SQL query and explain trade-offs. (Expected focus: indexes, query plan)\n"
-        )
-    if prompt_technique == "Chain-of-Thought":
-        # We do NOT ask for chain-of-thought; we only request concise rationale per question.
-        return (
-            "You are an expert interview coach. For each question, include a short 'why this matters' bullet (1 line)."
-        )
-    if prompt_technique == "Structured Output Prompt":
-        return (
-            "You are an expert interview coach. You must respond with valid JSON only, matching the schema provided."
-        )
-    return "You are an expert interview coach."
+    prompt_map: dict[PromptTechnique, str] = {
+        "Zero-Shot Prompting": ZERO_SHOT_PROMPT.strip(),
+        "Few-Shot Learning": FEW_SHOT_PROMPT.strip(),
+        "Chain-of-Thought": COT_PROMPT.strip(),
+        "Role-Based Prompting": ROLE_BASED_PROMPT.strip(),
+        "Structured Output Prompt": STRUCTURED_PROMPT.strip(),
+    }
+    return prompt_map.get(prompt_technique, ROLE_BASED_PROMPT.strip())
 
 
 def build_messages(
@@ -66,17 +160,16 @@ def build_messages(
 
     if prompt_technique == "Structured Output Prompt":
         user = f"""
-Create a personalized interview practice set from the provided Job Description and Resume/Profile.
+Generate interview questions from the provided Job Description and Resume/Profile.
 
 Difficulty: {difficulty}
 Count: {num_questions}
 
 Return JSON only with this schema:
 {{
-  "technical": [{{"question": "...", "difficulty": "{difficulty}", "focus": "..."}}],
-  "behavioral_star": [{{"question": "...", "focus": "STAR"}}],
-  "role_specific": [{{"question": "...", "focus": "..."}}],
-  "personality": [{{"question": "...", "framework": "..."}}]
+  "technical": ["..."],
+  "behavioral": ["..."],
+  "role_specific": ["..."]
 }}
 
 Job Description:
