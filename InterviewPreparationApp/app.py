@@ -365,36 +365,52 @@ def _finalize_interview(name: str) -> None:
     questions = (questions_map.get("technical") or []) + (questions_map.get("personality") or [])
     answers = (responses.get("technical") or []) + (responses.get("personality") or [])
 
-    answered_only = [a for a in answers if a.strip()]
-    score, strengths, improvements = analyze_answers(answered_only)
+    total_questions = len(questions)
+    substantive_count = sum(1 for a in answers if (a or "").strip())
+    # Questions without a real answer (never reached, skipped empty, or still pending)
+    unanswered_count = total_questions - substantive_count
+
     limited, msg = _rate_limited(name.strip().lower() or "anonymous")
     if limited:
         st.error(msg)
         st.stop()
 
-    ai_fb = _ai_feedback(
-        questions=questions,
-        answers=answers,
-        jd_val=st.session_state["jd_source_text"],
-        resume_val=st.session_state["resume_source_text"],
-    )
-    if isinstance(ai_fb, dict) and ai_fb.get("overall_score_0_100") is not None:
-        try:
-            score = int(float(ai_fb.get("overall_score_0_100")))
-        except Exception:
-            pass
-        strengths = ai_fb.get("strengths") or strengths
-        improvements = ai_fb.get("areas_for_improvement") or improvements
+    if substantive_count == 0:
+        # Do not call the model for "interview performance" — it would hallucinate from JD/resume alone.
+        st.session_state["performance_applicable"] = False
+        st.session_state["score"] = 0
+        st.session_state["strengths"] = [
+            "No written answers were submitted, so interview performance was not evaluated.",
+        ]
+        st.session_state["improvements"] = [
+            "Use Submit & Next or Skip on each question to record an attempt, or answer fully for real scoring.",
+        ]
+    else:
+        st.session_state["performance_applicable"] = True
+        answered_only = [a for a in answers if a.strip()]
+        score, strengths, improvements = analyze_answers(answered_only)
+        ai_fb = _ai_feedback(
+            questions=questions,
+            answers=answers,
+            jd_val=st.session_state["jd_source_text"],
+            resume_val=st.session_state["resume_source_text"],
+        )
+        if isinstance(ai_fb, dict) and ai_fb.get("overall_score_0_100") is not None:
+            try:
+                score = int(float(ai_fb.get("overall_score_0_100")))
+            except Exception:
+                pass
+            strengths = ai_fb.get("strengths") or strengths
+            improvements = ai_fb.get("areas_for_improvement") or improvements
+        st.session_state["score"] = score
+        st.session_state["strengths"] = strengths
+        st.session_state["improvements"] = improvements
 
     missing_keywords = match_resume_jd(
         st.session_state["jd_source_text"],
         st.session_state["resume_source_text"],
     )
-    unanswered_count = sum(1 for a in answers if not a.strip())
 
-    st.session_state["score"] = score
-    st.session_state["strengths"] = strengths
-    st.session_state["improvements"] = improvements
     st.session_state["missing_keywords"] = missing_keywords
     st.session_state["unanswered_count"] = unanswered_count
     st.session_state.pop("question_bank", None)
@@ -404,15 +420,21 @@ def _finalize_interview(name: str) -> None:
 
 
 def _ai_feedback(*, questions: list[str], answers: list[str], jd_val: str, resume_val: str) -> dict:
+    padded_answers = list(answers)
+    while len(padded_answers) < len(questions):
+        padded_answers.append("")
     system = (
-        "You are a strict but helpful interview evaluator. "
-        "Score the candidate based on clarity, relevance to the role, correctness (when applicable), and STAR structure for behavioral answers. "
-        "Do not be offensive. Keep it relevant."
+        "You are a strict interview evaluator. "
+        "Derive overall_score_0_100, strengths, and areas_for_improvement ONLY from the candidate's non-empty answers in qa. "
+        "Treat empty answers as not evaluated — do not infer interview performance from the job description or resume. "
+        "Do not list strengths that are not clearly demonstrated in those answers. "
+        "Be concise. Do not be offensive."
     )
     user = {
-        "job_description": jd_val,
-        "resume": resume_val,
-        "qa": [{"q": q, "a": a} for q, a in zip(questions, answers)],
+        "context_job_description": jd_val,
+        "context_resume": resume_val,
+        "note": "JD and resume are context only; do not score from them directly.",
+        "qa": [{"q": q, "a": a} for q, a in zip(questions, padded_answers)],
         "required_output_json_schema": {
             "overall_score_0_100": "number",
             "strengths": ["string"],
@@ -558,13 +580,19 @@ if "question_bank" in st.session_state and "progress" in st.session_state and "r
 if 'score' in st.session_state:
     st.header("Interview Review")
     st.subheader(f"{name}")
-    st.markdown(f"### Overall Performance Score\n**{st.session_state['score']}/100**")
-    if st.session_state['score'] >= 70:
-        st.success("Great job! You're well prepared.")
-    elif st.session_state['score'] >= 40:
-        st.info("Decent attempt. Review the feedback below.")
+    if st.session_state.get("performance_applicable", True):
+        st.markdown(f"### Overall Performance Score\n**{st.session_state['score']}/100**")
+        if st.session_state['score'] >= 70:
+            st.success("Great job! You're well prepared.")
+        elif st.session_state['score'] >= 40:
+            st.info("Decent attempt. Review the feedback below.")
+        else:
+            st.warning("Needs improvement. See areas below.")
     else:
-        st.warning("Needs improvement. See areas below.")
+        st.info(
+            "**Performance score:** Not generated — you ended the interview before submitting any answers. "
+            "Resume–JD matching below still reflects your documents."
+        )
     st.markdown("---")
     st.markdown("#### Strengths")
     for s in st.session_state['strengths']:
@@ -588,6 +616,7 @@ if 'score' in st.session_state:
             'jd_source_text',
             'resume_source_text',
             'unanswered_count',
+            'performance_applicable',
             'question_bank',
             'progress',
             'responses',
