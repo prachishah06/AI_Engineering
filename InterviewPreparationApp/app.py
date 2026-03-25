@@ -698,9 +698,9 @@ if "question_bank" in st.session_state and "progress" in st.session_state and "r
         setTextareaValue(finalTranscript.trim());
         if (statusEl) statusEl.innerText = 'Captured ✔';
       }} else {{
-      // Live update in the textbox (felt nicer for users).
-      setTextareaValue(interim.trim());
-      if (statusEl) statusEl.innerText = interim.trim() ? ('… ' + interim.trim().slice(0, 24)) : 'Listening…';
+        // Live update in the textbox (felt nicer for users).
+        setTextareaValue(interim.trim());
+        if (statusEl) statusEl.innerText = 'Listening…';
       }}
     }};
 
