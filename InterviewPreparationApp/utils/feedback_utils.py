@@ -36,14 +36,64 @@ def basic_content_filter(text: str) -> tuple[bool, str]:
     """
     if not text or not text.strip():
         return False, "Empty content."
+
     lowered = text.lower()
-    banned = [
+
+    # Offensive / disallowed themes (basic string/regex checks).
+    offensive_terms = [
+        # self-harm / violence
         "kill yourself",
         "suicide",
-        "nigger",
-        "rape",
+        "self-harm",
+        # sexual / porn
         "porn",
+        "nudes",
+        "nude ",
+        "explicit sex",
+        # slurs / hate
+        "nigger",
+        "faggot",
+        "queer ",
+        "kike",
+        # violence instructions / threats
+        "how to kill",
+        "bomb",
+        "make a bomb",
+        "shooting",
+        "weapon",
+        # harassment
+        "hate you",
+        "go die",
     ]
-    if any(b in lowered for b in banned):
+    if any(term in lowered for term in offensive_terms):
         return False, "Blocked content detected."
+
+    # Prompt-injection / jailbreak patterns (treat as unsafe user input).
+    injection_patterns = [
+        r"ignore (all|previous|any) instructions",
+        r"override (the )?(system|developer) prompt",
+        r"system prompt",
+        r"developer message",
+        r"assistant role",
+        r"jailbreak",
+        r"prompt injection",
+        r"disregard (the )?above",
+        r"act as an ai",
+        r"reveal (the )?(system|developer) prompt",
+    ]
+    for pat in injection_patterns:
+        if re.search(pat, lowered, flags=re.IGNORECASE):
+            return False, "Unsafe prompt injection detected."
+
+    # Additional irrelevant-content heuristic: block if it looks like instruction-tampering.
+    tamper_hints = [
+        "as a system",
+        "as a developer",
+        "you are now",
+        "respond exactly",
+        "without obeying",
+    ]
+    if any(h in lowered for h in tamper_hints) and ("resume" in lowered or "job description" in lowered or "answer" in lowered):
+        return False, "Unsafe or irrelevant instruction detected."
+
     return True, ""

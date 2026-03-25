@@ -1,9 +1,10 @@
 import streamlit as st
 import time
 import json
+import hashlib
 import streamlit.components.v1 as components
 from utils.file_utils import extract_text_from_file, validate_uploaded_file, MAX_FILE_BYTES
-from utils.prompt_utils import get_openai_response, validate_openai_api_key, try_parse_json
+from utils.prompt_utils import build_messages, get_openai_response, validate_openai_api_key, try_parse_json
 from utils.feedback_utils import analyze_answers, match_resume_jd, basic_content_filter
 
 
@@ -90,7 +91,7 @@ def _reset_app_state() -> None:
         "advanced_settings_toggle": False,
         "question_category": "Technical Questions",
         "api_key_valid": None,
-        "api_key_last_checked": "",
+        "api_key_hash_last_checked": "",
         "api_key_last_checked_model": "",
     }
     for key in list(st.session_state.keys()):
@@ -183,8 +184,8 @@ selected_model = st.selectbox(
 # --- API Key Field with Validation (masked, validate on change) ---
 if "api_key_valid" not in st.session_state:
     st.session_state["api_key_valid"] = None
-if "api_key_last_checked" not in st.session_state:
-    st.session_state["api_key_last_checked"] = ""
+if "api_key_hash_last_checked" not in st.session_state:
+    st.session_state["api_key_hash_last_checked"] = ""
 if "api_key_last_checked_model" not in st.session_state:
     st.session_state["api_key_last_checked_model"] = ""
 
@@ -193,16 +194,18 @@ def _validate_key_if_changed(api_key_val: str, model: str) -> None:
     api_key_val = (api_key_val or "").strip()
     if not api_key_val:
         st.session_state["api_key_valid"] = None
-        st.session_state["api_key_last_checked"] = ""
+        st.session_state["api_key_hash_last_checked"] = ""
         st.session_state["api_key_last_checked_model"] = ""
         return
+
+    api_key_hash = hashlib.sha256(api_key_val.encode("utf-8")).hexdigest()
     if (
-        api_key_val == st.session_state.get("api_key_last_checked", "")
+        api_key_hash == st.session_state.get("api_key_hash_last_checked", "")
         and model == st.session_state.get("api_key_last_checked_model", "")
     ):
         return
     st.session_state["api_key_valid"] = validate_openai_api_key(api_key_val, model=model)
-    st.session_state["api_key_last_checked"] = api_key_val
+    st.session_state["api_key_hash_last_checked"] = api_key_hash
     st.session_state["api_key_last_checked_model"] = model
 
 
@@ -310,37 +313,20 @@ def _get_text_inputs() -> tuple[str, str]:
 
 
 def _generate_questions(*, jd_val: str, resume_val: str) -> dict[str, list[str]]:
-    system = (
-        "You are an expert interview preparation assistant. "
-        "Generate only relevant interview questions from the job description and resume."
+    # Centralized prompt-building:
+    # - ensures prompt injection guard is present
+    # - ensures the selected prompt technique changes the system message
+    # - ensures output is deterministic JSON for reliable parsing
+    messages = build_messages(
+        jd_text=jd_val,
+        resume_text=resume_val,
+        difficulty=difficulty,
+        prompt_technique=prompt_technique,
+        num_questions=10,
     )
-    user = f"""
-Create exactly 10 questions in each category:
-- technical
-- personality
 
-Difficulty: {difficulty}
-Prompt technique: {prompt_technique}
-
-Return JSON only in this exact format:
-{{
-  "technical": ["q1", "q2", "..."],
-  "personality": ["q1", "q2", "..."]
-}}
-
-Rules:
-- Exactly 10 questions per category.
-- No extra keys.
-- No text outside JSON.
-
-Job Description:
-\"\"\"{jd_val}\"\"\"
-
-Resume/Profile:
-\"\"\"{resume_val}\"\"\"
-""".strip()
     raw = get_openai_response(
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        messages=messages,
         api_key=api_key,
         temperature=temperature,
         top_p=top_p,
@@ -348,7 +334,14 @@ Resume/Profile:
         presence_penalty=pres_penalty,
         model=selected_model,
     )
+
     parsed = try_parse_json(raw)
+    if not isinstance(parsed, dict):
+        # Best-effort: extract the first JSON object from the model response.
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            parsed = try_parse_json(raw[start : end + 1])
     out = {"technical": [], "personality": []}
     if isinstance(parsed, dict):
         tech = parsed.get("technical") or []
@@ -357,6 +350,7 @@ Resume/Profile:
             out["technical"] = [str(x).strip() for x in tech if str(x).strip()][:10]
         if isinstance(pers, list):
             out["personality"] = [str(x).strip() for x in pers if str(x).strip()][:10]
+
     return out
 
 
