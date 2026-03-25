@@ -1,6 +1,7 @@
 import streamlit as st
 import time
 import json
+import streamlit.components.v1 as components
 from utils.file_utils import extract_text_from_file, validate_uploaded_file, MAX_FILE_BYTES
 from utils.prompt_utils import get_openai_response, validate_openai_api_key, try_parse_json
 from utils.feedback_utils import analyze_answers, match_resume_jd, basic_content_filter
@@ -83,8 +84,8 @@ def _reset_app_state() -> None:
         "candidate_name": "",
         "api_key_input": "",
         "selected_model": "gpt-4.1-mini",
-        "jd_use_upload": True,
-        "resume_use_upload": True,
+        "jd_use_upload": False,
+        "resume_use_upload": False,
         "difficulty_level": "Beginner",
         "advanced_settings_toggle": False,
         "question_category": "Technical Questions",
@@ -119,7 +120,7 @@ st.markdown("<div class='section-subtitle'>Upload PDF/DOCX files or paste text f
 col1, col2 = st.columns(2)
 with col1:
     st.markdown("**Job Description***")
-    jd_use_upload = st.toggle("Upload job description instead of text", value=True, key="jd_use_upload")
+    jd_use_upload = st.toggle("Upload job description instead of text", value=False, key="jd_use_upload")
     jd_text = ""
     jd_file = None
     if jd_use_upload:
@@ -132,7 +133,7 @@ with col1:
         jd_text = st.text_area("Job Description text (max 500 chars)*", max_chars=500, height=140, key="jd_text")
 with col2:
     st.markdown("**Profile / Resume***")
-    resume_use_upload = st.toggle("Upload your resume instead of text", value=True, key="resume_use_upload")
+    resume_use_upload = st.toggle("Upload your resume instead of text", value=False, key="resume_use_upload")
     resume_text = ""
     resume_file = None
     if resume_use_upload:
@@ -538,7 +539,230 @@ if "question_bank" in st.session_state and "progress" in st.session_state and "r
         st.header(f"{category_label} - Question {idx + 1} of 10")
         st.write(qbank[cat][idx])
         answer_key = f"answer_{cat}_{idx}"
-        user_answer = st.text_area("Your Answer (optional)", key=answer_key)
+        # Speech-to-text (Web Speech API) helper for this specific Streamlit textarea.
+        # We attempt to populate the target textarea using its DOM id that includes the widget key.
+        # If the browser doesn't support speech recognition, the mic button is disabled.
+        answer_label = f"Your Answer (optional) [{category_label} {idx+1}/10]"
+        answer_label_js = json.dumps(answer_label)
+        a_col, mic_col = st.columns([10, 1])
+        with a_col:
+            user_answer = st.text_area(answer_label, key=answer_key)
+
+        mic_btn_id = f"stt_mic_{answer_key}".replace("-", "_")
+        stt_html = f"""
+<div style="display:flex; align-items:flex-start; justify-content:center;">
+  <button id="{mic_btn_id}" type="button"
+    style="width:38px; height:38px; border-radius:12px; border:1px solid rgba(31,111,235,0.25);
+           background:#f0f5ff; cursor:pointer; display:flex; align-items:center; justify-content:center;"
+    title="Click to speak. Click again to stop.">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3Z" stroke="#1f6feb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M19 11a7 7 0 0 1-14 0" stroke="#1f6feb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M12 18v2" stroke="#1f6feb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M9 20h6" stroke="#1f6feb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M4 21c2-1 4-3 6-6" stroke="#1f6feb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.35"/>
+      <path d="M20 21c-2-1-4-3-6-6" stroke="#1f6feb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.35"/>
+    </svg>
+  </button>
+</div>
+<div id="{mic_btn_id}_status" style="text-align:center; font-size:10px; color:#4b5b88; margin-top:2px; height:12px;"></div>
+<script>
+(function() {{
+  const btn = document.getElementById("{mic_btn_id}");
+  const statusEl = document.getElementById("{mic_btn_id}_status");
+  const targetKey = "{answer_key}";
+  const ariaLabel = {answer_label_js};
+  let recognition = null;
+  let isRecording = false;
+  let finalTranscript = '';
+
+  function escapeCss(s) {{
+    return s.replace(/([ #;?%&,.+*~':"!^$[\]()=>|\\/\\\\@])/g, '\\\\$1');
+  }}
+
+  function getTextarea() {{
+    // Try common possibilities: direct id match, partial id match, aria-label match.
+    const parentDoc = window.parent.document;
+    let el = parentDoc.getElementById(targetKey);
+    if (el && el.tagName && el.tagName.toLowerCase() === 'textarea') return el;
+    try {{
+      el = parentDoc.querySelector('textarea[aria-label=\"' + ariaLabel + '\"]');
+      if (el) return el;
+    }} catch(e) {{}}
+    try {{
+      const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(targetKey) : escapeCss(targetKey);
+      el = parentDoc.querySelector('textarea[id*=\"' + esc + '\"]');
+      if (el) return el;
+    }} catch(e) {{}}
+
+    // Fallback: match textarea whose id contains the widget key substring.
+    const all = parentDoc.querySelectorAll('textarea');
+    for (let i=0; i<all.length; i++) {{
+      const id = all[i].getAttribute('id') || '';
+      if (id.includes(targetKey)) return all[i];
+    }}
+    return null;
+  }}
+
+  function setTextareaValue(text) {{
+    const ta = getTextarea();
+    if (!ta) {{
+      if (statusEl) statusEl.innerText = 'Textarea not found';
+      return;
+    }}
+    // React/Streamlit listens to input/change; dispatch a stronger set of events
+    // Use native value setter to avoid React/Streamlit value tracking issues.
+    const proto = Object.getPrototypeOf(ta);
+    const valueDesc = Object.getOwnPropertyDescriptor(proto, 'value')
+      || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(proto), 'value');
+    if (valueDesc && valueDesc.set) {{
+      valueDesc.set.call(ta, text);
+    }} else {{
+      ta.value = text;
+    }}
+    ta.setAttribute('value', text);
+    ta.focus();
+    try {{
+      ta.dispatchEvent(new InputEvent('input', {{
+        bubbles: true,
+        composed: true,
+        inputType: 'insertText',
+        data: text
+      }}));
+    }} catch (e) {{
+      ta.dispatchEvent(new Event('input', {{ bubbles: true, composed: true }}));
+    }}
+    ta.dispatchEvent(new Event('change', {{ bubbles: true, composed: true }}));
+    ta.dispatchEvent(new Event('blur', {{ bubbles: true, composed: true }}));
+    ta.blur();
+    // Extra events to help Streamlit's widget change-detection catch it.
+    try {{
+      ta.dispatchEvent(new KeyboardEvent('keydown', {{ bubbles: true, composed: true, key: 'SpeechInput' }}));
+      ta.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true, composed: true, key: 'SpeechInput' }}));
+    }} catch (e) {{}}
+    // Re-dispatch on next frame (helps when users click immediately after stopping).
+    try {{
+      window.requestAnimationFrame(() => {{
+        try {{
+          ta.dispatchEvent(new Event('input', {{ bubbles: true, composed: true }}));
+          ta.dispatchEvent(new Event('change', {{ bubbles: true, composed: true }}));
+        }} catch(e) {{}}
+      }});
+    }} catch(e) {{}}
+  }}
+
+  function setButtonRecording(on) {{
+    if (!btn) return;
+    isRecording = on;
+    btn.style.background = on ? '#fee2e2' : '#f0f5ff';
+    btn.style.borderColor = on ? 'rgba(239,68,68,0.6)' : 'rgba(31,111,235,0.25)';
+    if (statusEl) statusEl.innerText = on ? 'Listening…' : '';
+    const svgPaths = btn.querySelectorAll('path');
+    // Change stroke colors while recording.
+    svgPaths.forEach(p => {{
+      p.setAttribute('stroke', on ? '#ef4444' : '#1f6feb');
+    }});
+  }}
+
+  function startRec() {{
+    // Web Speech API is not always available on the iframe window; check parent too.
+    const SR =
+      window.SpeechRecognition ||
+      window.webkitSpeechRecognition ||
+      window.parent.SpeechRecognition ||
+      window.parent.webkitSpeechRecognition;
+    if (!SR) {{
+      btn && (btn.disabled = true);
+      if (statusEl) statusEl.innerText = 'SpeechRecognition not supported';
+      return;
+    }}
+
+    finalTranscript = '';
+    recognition = new SR();
+    recognition.lang = 'en-US';
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.continuous = false;
+
+    recognition.onresult = (event) => {{
+      let interim = '';
+      let anyFinal = '';
+      for (let i = 0; i < event.results.length; i++) {{
+        interim += event.results[i][0].transcript;
+        if (event.results[i].isFinal) {{
+          anyFinal += event.results[i][0].transcript;
+        }}
+      }}
+      if (anyFinal.trim()) {{
+        finalTranscript = anyFinal;
+        setTextareaValue(finalTranscript.trim());
+        if (statusEl) statusEl.innerText = 'Captured ✔';
+      }} else {{
+      // Live update in the textbox (felt nicer for users).
+      setTextareaValue(interim.trim());
+      if (statusEl) statusEl.innerText = interim.trim() ? ('… ' + interim.trim().slice(0, 24)) : 'Listening…';
+      }}
+    }};
+
+    recognition.onstart = () => {{
+      setButtonRecording(true);
+    }};
+
+    recognition.onend = () => {{
+      setButtonRecording(false);
+      // Ensure final value is set (last interim is usually final).
+      if (finalTranscript && finalTranscript.trim()) {{
+        setTextareaValue(finalTranscript.trim());
+      }}
+    }};
+
+    recognition.onerror = (event) => {{
+      setButtonRecording(false);
+      if (statusEl) statusEl.innerText = 'Mic error: ' + (event && event.error ? event.error : 'unknown');
+    }};
+
+    try {{
+      if (statusEl) statusEl.innerText = 'Requesting microphone…';
+    recognition.start();
+      setButtonRecording(true);
+    }} catch (e) {{
+      setButtonRecording(false);
+      if (statusEl) statusEl.innerText = 'Mic start failed';
+    }}
+  }}
+
+  function stopRec() {{
+    try {{
+      recognition && recognition.stop();
+    }} catch(e) {{}}
+    setButtonRecording(false);
+    if (finalTranscript && finalTranscript.trim()) {{
+      setTextareaValue(finalTranscript.trim());
+      // Nudge Streamlit's listeners a moment later (covers immediate Submit click).
+      try {{
+        const ta = getTextarea();
+        window.setTimeout(() => {{
+          if (!ta) return;
+          try {{
+            ta.dispatchEvent(new KeyboardEvent('keyup', {{ bubbles: true }}));
+            ta.dispatchEvent(new Event('input', {{ bubbles: true, composed: true }}));
+          }} catch(e) {{}}
+        }}, 120);
+      }} catch(e) {{}}
+    }}
+  }}
+
+  if (btn) {{
+    btn.addEventListener('click', () => {{
+      if (!isRecording) startRec();
+      else stopRec();
+    }});
+  }}
+}})();
+</script>
+"""
+        with mic_col:
+            components.html(stt_html, height=84)
 
         st.markdown("<div class='compact-row'>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns([1.5, 1.1, 1.1], gap="small")
