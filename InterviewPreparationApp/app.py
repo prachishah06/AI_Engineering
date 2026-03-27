@@ -5,7 +5,8 @@ import hashlib
 import streamlit.components.v1 as components
 from utils.file_utils import extract_text_from_file, validate_uploaded_file, MAX_FILE_BYTES
 from utils.prompt_utils import build_messages, get_openai_response, validate_openai_api_key, try_parse_json
-from utils.feedback_utils import analyze_answers, match_resume_jd, basic_content_filter
+from utils.feedback_utils import analyze_answers, basic_content_filter
+from utils.judge_utils import judge_outputs, PROMPT_MAP
 
 
 # --- Improved UI: Sidebar Branding ---
@@ -181,6 +182,9 @@ selected_model = st.selectbox(
     key="selected_model",
 )
 
+# Separate model for judge (stronger model)
+judge_model = "gpt-4o"  # more reliable for evaluation
+
 # --- API Key Field with Validation (masked, validate on change) ---
 if "api_key_valid" not in st.session_state:
     st.session_state["api_key_valid"] = None
@@ -235,7 +239,9 @@ difficulty = st.selectbox(
     help="Choose your practice level.",
     key="difficulty_level",
 )
+use_judge = st.toggle("Auto-select best prompt (LLM Judge)", value=True)
 
+st.caption(f"Mode: {'Auto (LLM Judge)' if use_judge else 'Manual'}")
 
 # --- Advanced Settings Toggle ---
 advanced_settings = st.toggle("Advanced settings", value=False, key="advanced_settings_toggle")
@@ -354,6 +360,52 @@ def _generate_questions(*, jd_val: str, resume_val: str) -> dict[str, list[str]]
     return out
 
 
+def _generate_questions_with_judge(jd_val, resume_val):
+    prompt_types = [
+        "Zero-Shot Prompting",
+        "Few-Shot Learning",
+        "Chain-of-Thought",
+        "Role-Based Prompting",
+        "Structured Output Prompt",
+    ]
+
+    outputs = {}
+
+    for pt in prompt_types:
+        messages = build_messages(
+            jd_text=jd_val,
+            resume_text=resume_val,
+            difficulty=difficulty,
+            prompt_technique=pt,
+            num_questions=10,
+        )
+
+        raw = get_openai_response(
+            messages=messages,
+            api_key=api_key,
+            temperature=temperature,
+            top_p=top_p,
+            frequency_penalty=freq_penalty,
+            presence_penalty=pres_penalty,
+            model=selected_model,
+        )
+
+        parsed = try_parse_json(raw)
+        if isinstance(parsed, dict):
+            outputs[PROMPT_MAP[pt]] = parsed
+
+    if not outputs:
+        return {"technical": [], "personality": []}
+
+    judge_result = judge_outputs(outputs, api_key, judge_model)
+
+    if judge_result and "best_prompt" in judge_result:
+        best = judge_result["best_prompt"]
+        st.success(f"Best Prompt Selected: {best}")
+        return outputs.get(best, list(outputs.values())[0])
+
+    return list(outputs.values())[0]
+
 def _finalize_interview(name: str) -> None:
     responses = st.session_state.get("responses", {"technical": [], "personality": []})
     questions_map = st.session_state.get("question_bank", {"technical": [], "personality": []})
@@ -401,12 +453,7 @@ def _finalize_interview(name: str) -> None:
         st.session_state["strengths"] = strengths
         st.session_state["improvements"] = improvements
 
-    missing_keywords = match_resume_jd(
-        st.session_state["jd_source_text"],
-        st.session_state["resume_source_text"],
-    )
 
-    st.session_state["missing_keywords"] = missing_keywords
     st.session_state["unanswered_count"] = unanswered_count
     st.session_state.pop("question_bank", None)
     st.session_state.pop("progress", None)
@@ -482,7 +529,12 @@ if start_btn:
                 st.error(msg)
                 st.stop()
 
-            question_bank = _generate_questions(jd_val=jd_text_val, resume_val=resume_text_val)
+            #question_bank = _generate_questions(jd_val=jd_text_val, resume_val=resume_text_val)
+            if use_judge:
+                question_bank = _generate_questions_with_judge(jd_text_val, resume_text_val)
+            else:
+                question_bank = _generate_questions(jd_val=jd_text_val, resume_val=resume_text_val)
+            
             if not question_bank.get("technical") or not question_bank.get("personality"):
                 st.error("Could not generate questions. Try switching prompt technique or simplifying inputs.")
                 st.stop()
@@ -818,10 +870,6 @@ if 'score' in st.session_state:
     st.markdown("#### Areas for Improvement")
     for i in st.session_state['improvements']:
         st.markdown(f"- {i}")
-    st.markdown("#### Resume–JD Matching Insights")
-    if st.session_state['missing_keywords']:
-        missing = st.session_state['missing_keywords'][:40]
-        st.error(f"Skill gaps / Missing keywords (sample): {', '.join(missing)}")
     else:
         st.success("No major skill gaps detected!")
     st.markdown(f"#### Unanswered Questions\n**{st.session_state.get('unanswered_count', 0)}**")
@@ -830,7 +878,6 @@ if 'score' in st.session_state:
             'score',
             'strengths',
             'improvements',
-            'missing_keywords',
             'jd_source_text',
             'resume_source_text',
             'unanswered_count',
